@@ -1538,7 +1538,7 @@ dependencies = [
 [[package]]
 name = "craft-web-host"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=fd5e2feff6ea25bed371a99cc732b3968d621505#fd5e2feff6ea25bed371a99cc732b3968d621505"
+source = "git+https://github.com/FounderOS/craft-libs?branch=founderos%2Fmain#c3008ca94135723adcdb72951e78477157f9182f"
 dependencies = [
  "wasm-bindgen",
  "web-sys",
