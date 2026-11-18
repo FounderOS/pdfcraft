@@ -47,13 +47,10 @@ fn main() {
                             ctx.request_repaint();
                         });
                     }
-                    // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
-                    // prompts; ask the browser to confirm instead while a document has unsaved work or an OCR review is open (#812).
-                    warn_before_unload(app.unsaved_flag.clone());
-                    // Host modes (`host` below, over `craft-web-host`): `?host=parent`, a
-                    // same-origin page embedding PdfCraft in an iframe (such as the Nextcloud
-                    // app), or `data-host="page"` on the canvas, a host that runs the module in
-                    // its own document.
+                    // Host modes (`host` below, over `craft-web-host`): `?host=parent`, a page
+                    // embedding PdfCraft in an iframe (same-origin, such as the Nextcloud app, or
+                    // another origin named in `?parentOrigin=` and listed in the page), or
+                    // `data-host="page"` on the canvas, a host that runs the module in its own document.
                     if let Some(bridge) = app_canvas().as_ref().and_then(host::Bridge::connect) {
                         // `?author=`: the host's name for the user signs their comments,
                         // unless they chose a name in PdfCraft (the web default is "Guest").
@@ -66,10 +63,14 @@ fn main() {
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
                         bridge.post_ready();
-                    } else if query_param("host").as_deref() == Some("parent") {
-                        eframe::web_sys::console::warn_1(
-                            &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
-                        );
+                    } else {
+                        // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
+                        // prompts; ask the browser to confirm instead while a document has unsaved work or an OCR review
+                        // is open (#812). Only unhosted: a host keeps the document and hears `dirty`, so leaving is its question.
+                        warn_before_unload(app.unsaved_flag.clone());
+                        if query_param("host").as_deref() == Some("parent") {
+                            warn_unhosted_parent();
+                        }
                     }
                     // `?control`: `window.pdfcraft`, the page's command API (`api`). Opt-in: the control
                     // channel keeps the accessibility tree of every frame.
@@ -87,6 +88,25 @@ fn main() {
             }
         }
     });
+}
+
+/// `?host=parent` found no parent to talk to: one console warning that says why. A parent named in
+/// `?parentOrigin=` but missing from `<meta name="craft-allowed-parents">` was already reported by
+/// `craft-web-host`, so it gets no second one here.
+#[cfg(target_arch = "wasm32")]
+fn warn_unhosted_parent() {
+    let Some(window) = web_sys::window() else { return };
+    let framed = window.parent().ok().flatten().is_some_and(|parent| !js_sys::Object::is(&parent, &window));
+    let query = window.location().search().unwrap_or_default();
+    let own_origin = window.location().origin().unwrap_or_default();
+    let warning = if !framed {
+        "PdfCraft: ?host=parent but the page is not in a frame; saves download instead"
+    } else if craft_web_host::allow::cross_origin(&query, &own_origin).is_some() {
+        return;
+    } else {
+        "PdfCraft: ?host=parent needs a framing page on the same origin, or one named in ?parentOrigin= and listed in <meta name=\"craft-allowed-parents\">; saves download instead"
+    };
+    eframe::web_sys::console::warn_1(&warning.into());
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -135,8 +155,9 @@ fn app_canvas() -> Option<web_sys::HtmlCanvasElement> {
 /// other Craft apps' bridges, with the `pdfcraft:` prefix. This module is PdfCraft's part of it.
 ///
 /// - `?host=parent` is the `postMessage` bridge for a same-origin page that embeds PdfCraft in an
-///   iframe (such as the Nextcloud app). With a parent on another origin there is no bridge: the
-///   app runs as if unframed and saves download (#2167). `data-host="page"` on the app's canvas
+///   iframe (such as the Nextcloud app), or for one on another origin that names itself in
+///   `?parentOrigin=` and is listed in the page's `<meta name="craft-allowed-parents">`. Any other
+///   parent gets no bridge: the app runs as if unframed and saves download (#2167). `data-host="page"` on the app's canvas
 ///   is for a host that loads the module into its own document, with no iframe: the same messages
 ///   travel as DOM `CustomEvent`s on that canvas. `?host=parent` wins when both are present.
 /// - `pdfcraft:ready` once the app is listening; send files now. PdfCraft reads bytes, so it
@@ -170,7 +191,7 @@ mod host {
     impl Bridge {
         /// The bridge for this page, or `None` when PdfCraft isn't hosted: no `?host=parent` and
         /// no `data-host="page"` on the canvas, an unframed `?host=parent` page, or a parent on
-        /// another origin (messages only go to this origin, so the browser would drop every save
+        /// another origin that is not named and allowed (messages only go to a known origin, so the browser would drop every save
         /// without an error while the document showed as saved, #2167).
         pub fn connect(canvas: &web_sys::HtmlCanvasElement) -> Option<Self> {
             Some(Self { host: Rc::new(Host::connect(APP, canvas)?) })
