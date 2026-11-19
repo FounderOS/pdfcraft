@@ -5,6 +5,10 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod api;
+#[cfg(any(target_arch = "wasm32", test))]
+mod autosave;
+#[cfg(target_arch = "wasm32")]
+mod shell;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -51,7 +55,9 @@ fn main() {
                     // embedding PdfCraft in an iframe (same-origin, such as the Nextcloud app, or
                     // another origin named in `?parentOrigin=` and listed in the page), or
                     // `data-host="page"` on the canvas, a host that runs the module in its own document.
-                    if let Some(bridge) = app_canvas().as_ref().and_then(host::Bridge::connect) {
+                    let bridge = app_canvas().as_ref().and_then(host::Bridge::connect);
+                    let hosted = bridge.is_some();
+                    if let Some(bridge) = bridge {
                         // `?author=`: the host's name for the user signs their comments,
                         // unless they chose a name in PdfCraft (the web default is "Guest").
                         if let Some(author) = query_param("author").map(|a| a.trim().to_string()).filter(|a| !a.is_empty())
@@ -77,7 +83,7 @@ fn main() {
                     if query_param("control").is_some() {
                         api::install(app.attach_control(&cc.egui_ctx));
                     }
-                    Ok(Box::new(app))
+                    Ok(Box::new(shell::WebShell::new(app, hosted)))
                 }),
             )
             .await;

@@ -1,6 +1,7 @@
 use super::{PdfCraftApp, StagingName, staging_suffixes};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::file_filter::AddFilterAnyCase as _;
+mod silently;
 
 /// A save held back by [`Dialog::OverwriteChanged`](crate::Dialog::OverwriteChanged): the file
 /// on disk is another version than the document came from (#2166).

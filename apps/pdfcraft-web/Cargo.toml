@@ -18,6 +18,8 @@ craft-web-host = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2
 eframe = { workspace = true, features = ["default_fonts", "glow", "persistence", "accesskit"] }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 serde_json = { workspace = true }
+# The autosave clock (`autosave`): `std::time::Instant` panics in the browser.
+web-time = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
