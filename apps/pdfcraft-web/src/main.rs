@@ -7,6 +7,8 @@
 mod api;
 #[cfg(any(target_arch = "wasm32", test))]
 mod autosave;
+#[cfg(any(target_arch = "wasm32", test))]
+mod in_flight;
 #[cfg(target_arch = "wasm32")]
 mod shell;
 
@@ -56,7 +58,7 @@ fn main() {
                     // another origin named in `?parentOrigin=` and listed in the page), or
                     // `data-host="page"` on the canvas, a host that runs the module in its own document.
                     let bridge = app_canvas().as_ref().and_then(host::Bridge::connect);
-                    let hosted = bridge.is_some();
+                    let saves = bridge.as_ref().map(host::Bridge::in_flight);
                     if let Some(bridge) = bridge {
                         // `?author=`: the host's name for the user signs their comments,
                         // unless they chose a name in PdfCraft (the web default is "Guest").
@@ -83,7 +85,7 @@ fn main() {
                     if query_param("control").is_some() {
                         api::install(app.attach_control(&cc.egui_ctx));
                     }
-                    Ok(Box::new(shell::WebShell::new(app, hosted)))
+                    Ok(Box::new(shell::WebShell::new(app, saves)))
                 }),
             )
             .await;
@@ -170,8 +172,9 @@ fn app_canvas() -> Option<web_sys::HtmlCanvasElement> {
 ///   says `file: false` and a host sends `bytes`.
 /// - `pdfcraft:open` (from the host): `{ name, bytes }` holding a PDF. It opens in a tab, like a
 ///   `?file=` URL; a file over [`host::MAX_OPEN_BYTES`] is refused before it is copied.
-/// - `pdfcraft:save` (to the host): `{ name, saveAs, bytes }` when the user saves. The host stores
-///   the file (and reports its own errors).
+/// - `pdfcraft:save` (to the host): `{ name, saveAs, bytes, id }` when the user saves. The host
+///   stores the file (and reports its own errors) and answers `pdfcraft:saved` `{ id }`; autosave
+///   waits for that (`in_flight`).
 /// - `pdfcraft:dirty` whenever unsaved work appears or goes away, `pdfcraft:failed` when the app
 ///   couldn't start.
 #[cfg(target_arch = "wasm32")]
@@ -179,6 +182,7 @@ mod host {
     use std::rc::Rc;
 
     use craft_web_host::web::{FileData, Host, Message};
+    use web_time::Instant;
 
     /// The app id in the host messages (`pdfcraft:ready`).
     const APP: &str = "pdfcraft";
@@ -192,6 +196,8 @@ mod host {
     #[derive(Clone)]
     pub struct Bridge {
         host: Rc<Host>,
+        /// Saves posted and not yet answered with `saved` ([`crate::in_flight`]).
+        in_flight: crate::in_flight::Shared,
     }
 
     impl Bridge {
@@ -200,7 +206,7 @@ mod host {
         /// another origin that is not named and allowed (messages only go to a known origin, so the browser would drop every save
         /// without an error while the document showed as saved, #2167).
         pub fn connect(canvas: &web_sys::HtmlCanvasElement) -> Option<Self> {
-            Some(Self { host: Rc::new(Host::connect(APP, canvas)?) })
+            Some(Self { host: Rc::new(Host::connect(APP, canvas)?), in_flight: Rc::default() })
         }
 
         pub fn post_ready(&self) {
@@ -214,16 +220,33 @@ mod host {
 
         /// Hear `pdfcraft:open` and queue the file like a `?file=` download.
         pub fn listen(&self, inbox: pdfcraft_ui_egui::Inbox, ctx: egui::Context) {
-            self.host.listen(move |message| {
-                if let Message::Open { name, data } = message {
-                    queue_open(&name, &data, &inbox, &ctx);
+            let in_flight = self.in_flight.clone();
+            self.host.listen(move |message| match message {
+                Message::Open { name, data } => queue_open(&name, &data, &inbox, &ctx),
+                Message::Saved { id } => {
+                    in_flight.borrow_mut().done(&id);
+                    ctx.request_repaint();
                 }
+                _ => {}
             });
         }
 
         pub fn save_fn(&self) -> pdfcraft_ui_egui::HostSaveFn {
-            let host = self.host.clone();
-            Box::new(move |name: &str, bytes: &[u8], save_as: bool| host.post_save(name, bytes, None, save_as))
+            let (host, in_flight) = (self.host.clone(), self.in_flight.clone());
+            Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
+                // The borrow ends before the post: a page host may answer `saved` while it runs.
+                let id = in_flight.borrow_mut().begin(Instant::now());
+                let posted = host.post_save(name, bytes, Some(&id), save_as);
+                if posted.is_err() {
+                    in_flight.borrow_mut().done(&id);
+                }
+                posted
+            })
+        }
+
+        /// The saves out, for autosave to wait on (`crate::shell`).
+        pub fn in_flight(&self) -> crate::in_flight::Shared {
+            self.in_flight.clone()
         }
 
         pub fn dirty_fn(&self) -> pdfcraft_ui_egui::HostDirtyFn {
